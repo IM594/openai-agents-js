@@ -308,6 +308,15 @@ const sidebar = [
           ko: '전송 방식',
         },
       },
+      {
+        label: 'Realtime events',
+        link: '/guides/voice-agents/events',
+        translations: {
+          ja: 'イベントリファレンス',
+          zh: '事件参考',
+          ko: '이벤트 레퍼런스',
+        },
+      }
     ],
   },
   {

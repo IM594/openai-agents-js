@@ -1,0 +1,162 @@
+---
+title: Realtime events reference
+description: Meanings of OpenAI Realtime API events and the SDK's transport/session events.
+---
+
+
+This page summarizes all relevant realtime events in three layers you may interact with:
+
+- OpenAI Realtime server events you receive over WebSocket/WebRTC.
+- Transport layer events the SDK emits for low-level control.
+- RealtimeSession events the SDK emits at a higher level for app logic.
+
+You can also find the schemas in code under packages/agents-realtime:
+- openaiRealtimeEvents.ts
+- transportLayerEvents.ts
+- realtimeSessionEvents.ts
+
+## Event layers at a glance
+
+- Server events: Raw events from OpenAI, e.g. response.output_text.delta, conversation.item.truncated.
+- Transport events: Normalized events emitted by OpenAIRealtimeWebSocket/WebRTC instances.
+- Session events: High-level SDK events emitted by RealtimeSession (agent_start, audio_interrupted, history_updated, etc.).
+
+## OpenAI Realtime server events (incoming)
+
+Grouped by area; all payload shapes are defined in openaiRealtimeEvents.ts.
+
+### Conversation
+- conversation.created: A new conversation object was created.
+- conversation.item.added: An item was added to the conversation (e.g. message/function/mcp item started).
+- conversation.item.done: An item finished (final status/content available).
+- conversation.item.deleted: An item was deleted by ID.
+- conversation.item.retrieved: Full details of a specific item (typically after a retrieve request).
+- conversation.item.input_audio_transcription.delta: Partial transcript for a user audio input item.
+- conversation.item.input_audio_transcription.completed: Final transcript for a user audio input item.
+- conversation.item.input_audio_transcription.failed: Transcription failed with an error.
+- conversation.item.truncated: Model output audio for an item was truncated at audio_end_ms/content_index. Typically emitted after you (or the server) interrupt the model mid-speech.
+
+Tip: When a user interrupts AI speech, the client sends conversation.item.truncate; the server replies with conversation.item.truncated and the model stops speaking.
+
+### Input audio buffer (client microphone -> server)
+- input_audio_buffer.append: Client is sending input audio (base64 PCM/PCMU/PCMA bytes).
+- input_audio_buffer.commit: Client committed the audio chunk for the current turn.
+- input_audio_buffer.cleared: Notification that the server cleared the input buffer.
+- input_audio_buffer.clear: Client asks to clear the current input buffer.
+- input_audio_buffer.committed: Server confirms the audio was committed, with the created item_id.
+- input_audio_buffer.speech_started: VAD detected the user started speaking.
+- input_audio_buffer.speech_stopped: VAD detected the user stopped speaking.
+
+### Output audio buffer (server -> client)
+- output_audio_buffer.started: Model started producing output audio.
+- output_audio_buffer.stopped: Model paused/stopped producing output audio.
+- output_audio_buffer.cleared: Output audio buffer was cleared (e.g. after interruption).
+
+### Response lifecycle and streaming
+- response.created: A response turn started (SDK maps this to turn_started).
+- response.done: A response turn finished (usage and final output available; SDK maps to turn_done).
+- response.output_text.delta: Streaming text delta for the current output item.
+- response.output_text.done: Final text chunk for the current output item.
+- response.output_audio.delta: A base64 audio chunk for the current output item.
+- response.output_audio.done: Audio streaming finished for the current output item.
+- response.output_audio_transcript.delta: Streaming transcript of the model’s spoken output.
+- response.output_audio_transcript.done: Final transcript of the model’s spoken output.
+- response.content_part.added: A content part (text/audio) was added to the output sequence.
+- response.content_part.done: A content part finished.
+- response.output_item.added: An output item (message/function/mcp) was added.
+- response.output_item.done: That output item finished.
+
+### Function and MCP tool calls
+- response.function_call_arguments.delta: Streaming JSON arguments for a function call.
+- response.function_call_arguments.done: Final JSON arguments for a function call.
+- response.mcp_call.in_progress: An MCP call started; fetch the item for details.
+- response.mcp_call.completed: MCP call finished; output is available on the item.
+- response.mcp_call_arguments.delta: Streaming arguments for an MCP call (may be obfuscated).
+- response.mcp_call_arguments.done: Final arguments for an MCP call.
+- mcp_list_tools.in_progress: Model is listing MCP tools from a server.
+- mcp_list_tools.completed: Listing finished, tools available on the item.
+- mcp_list_tools.failed: Listing failed.
+
+### Session and rate limits
+- session.created: Initial session info (also includes tracing config).
+- session.updated: Session configuration updated.
+- rate_limits.updated: Request/token quotas updated; inspect remaining/reset.
+
+### Errors
+- error: An error payload from the server.
+
+## Client messages you can send (outgoing)
+
+- conversation.item.create: Create a user message item (text/images) to prompt the model.
+- conversation.item.delete: Delete an item by ID.
+- conversation.item.retrieve: Ask the server to return the full item payload.
+- conversation.item.truncate: Truncate an in-progress assistant output at audio_end_ms (used to interrupt speech).
+- input_audio_buffer.append: Send raw audio to the server.
+- input_audio_buffer.commit: Finish the current audio turn.
+- input_audio_buffer.clear: Clear the current audio buffer.
+- response.create: Ask the model to produce a new response (useful after tool output).
+- response.cancel: Cancel an in-progress response.
+- session.update: Update session configuration (instructions, tools, audio config, etc.).
+
+In the WebSocket transport, interrupt() sends conversation.item.truncate (and, optionally, response.cancel). The server then emits conversation.item.truncated.
+
+## Transport layer events (SDK)
+
+Emitted by OpenAIRealtimeWebSocket/WebRTC. Shapes are defined in transportLayerEvents.ts.
+
+- *: Every raw server event for low-level inspection.
+- error: Transport-level error.
+- connection_change: 'connecting' | 'connected' | 'disconnected'.
+- turn_started: A response turn began (maps from response.created).
+- turn_done: A response turn ended (maps from response.done; includes usage).
+- audio: A chunk of output audio is available (ArrayBuffer).
+- audio_done: Model finished output audio for the current item.
+- audio_interrupted: The transport interrupted playback due to user speech or explicit interrupt().
+- audio_transcript_delta: Streaming transcript of model speech (text delta).
+- usage_update: Usage counters updated.
+- item_update: History item added/updated (message, function, MCP call, etc.).
+- item_deleted: Item removed from history.
+- function_call: Model requested a function/tool call with name and streaming arguments.
+- mcp_tool_call_completed: An MCP tool call finished.
+- mcp_approval_request: A remote MCP tool requires approval before execution.
+- mcp_tools_listed: Tools listed by a remote MCP server for a given serverLabel.
+
+## RealtimeSession events (SDK)
+
+High-level events for application logic; shapes are defined in realtimeSessionEvents.ts.
+
+- agent_start: The active agent started working on a response turn.
+- agent_end: The active agent finished; includes final text.
+- agent_handoff: Agent handoff occurred (from->to).
+- agent_tool_start: A tool call started.
+- agent_tool_end: A tool call finished; includes result.
+- transport_event: Mirrors transport layer events if you need raw access.
+- audio_start: First audio chunk of a response started streaming.
+- audio_stopped: Audio output finished.
+- audio: Output audio chunk ready to play.
+- audio_interrupted: Output was interrupted (stop playback/visualize).
+- guardrail_tripped: An output guardrail triggered; the session auto-interrupts and sends feedback.
+- history_updated: Full local history snapshot changed.
+- history_added: A new item was added to local history.
+- error: An error occurred in the session.
+- tool_approval_requested: A tool or MCP call requires approval.
+- mcp_tool_call_completed: An MCP tool call finished.
+- mcp_tools_changed: The set of currently available MCP tools changed (after list-tools or handoff).
+
+## Interruption lifecycle (example)
+
+When a user starts speaking while the model is talking:
+
+1. The server emits input_audio_buffer.speech_started.
+2. The SDK calls interrupt().
+3. The transport emits audio_interrupted and sends conversation.item.truncate with audio_end_ms and content_index.
+4. The server replies with conversation.item.truncated; output audio stops.
+5. The session emits audio_interrupted so you can stop playback and update UI.
+
+You can also explicitly interrupt, for example on a "Stop" button:
+
+```ts
+session.interrupt();
+```
+
+After an interruption, you can immediately send the user input (text/audio), or let turn detection handle it automatically depending on your session config.

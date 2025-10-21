@@ -1,0 +1,162 @@
+---
+title: 实时事件参考
+description: 汇总 OpenAI Realtime API 的事件含义，以及 SDK 传输层/会话层事件，便于开发对接。
+---
+
+
+本页按三层结构梳理了实时相关的事件：
+
+- 服务器事件（OpenAI Realtime，通过 WebSocket/WebRTC 收到）。
+- 传输层事件（SDK 的低层事件，便于细粒度控制）。
+- 会话层事件（SDK 的高层抽象，适合业务逻辑）。
+
+对应代码位置：packages/agents-realtime
+- openaiRealtimeEvents.ts（服务器事件 Schema）
+- transportLayerEvents.ts（传输层事件类型）
+- realtimeSessionEvents.ts（会话层事件类型）
+
+## 事件分层概览
+
+- 服务器事件：来自 OpenAI 的原始事件，如 response.output_text.delta、conversation.item.truncated 等。
+- 传输层事件：由 OpenAIRealtimeWebSocket/WebRTC 实例对外抛出的标准化事件。
+- 会话层事件：RealtimeSession 抛出的高层事件（agent_start、audio_interrupted、history_updated 等）。
+
+## OpenAI Realtime 服务器事件（接收）
+
+以下按主题分组，完整字段见 openaiRealtimeEvents.ts。
+
+### 会话条目（Conversation）
+- conversation.created：会话对象已创建。
+- conversation.item.added：会话中新增了一条条目（如 message/function/mcp，开始阶段）。
+- conversation.item.done：条目完成（最终状态/内容可用）。
+- conversation.item.deleted：按 ID 删除了一条条目。
+- conversation.item.retrieved：返回指定条目的完整信息（通常由 retrieve 请求触发）。
+- conversation.item.input_audio_transcription.delta：用户语音输入的部分转写（增量）。
+- conversation.item.input_audio_transcription.completed：用户语音输入的最终转写结果。
+- conversation.item.input_audio_transcription.failed：转写失败并附带错误信息。
+- conversation.item.truncated：模型的输出语音被截断，包含 audio_end_ms/content_index。通常在用户打断模型说话后收到该事件。
+
+提示：当用户打断 AI 语音时，客户端会发送 conversation.item.truncate；服务器随后返回 conversation.item.truncated，模型停止播报。
+
+### 输入音频缓冲（从客户端麦克风到服务器）
+- input_audio_buffer.append：客户端发送音频数据（base64 的 PCM/PCMU/PCMA）。
+- input_audio_buffer.commit：提交本次音频，结束该轮输入。
+- input_audio_buffer.cleared：服务器告知输入缓冲已被清空。
+- input_audio_buffer.clear：客户端请求清空输入缓冲。
+- input_audio_buffer.committed：服务器确认输入音频已提交，并返回创建的 item_id。
+- input_audio_buffer.speech_started：VAD 检测到用户开始说话。
+- input_audio_buffer.speech_stopped：VAD 检测到用户停止说话。
+
+### 输出音频缓冲（从服务器到客户端）
+- output_audio_buffer.started：模型开始产生输出音频。
+- output_audio_buffer.stopped：模型暂停/停止产生输出音频。
+- output_audio_buffer.cleared：输出音频缓冲被清空（例如打断后）。
+
+### 响应生命周期与流式数据
+- response.created：开始一轮响应（SDK 映射为 turn_started）。
+- response.done：该轮响应结束（包含用量与最终输出；SDK 映射为 turn_done）。
+- response.output_text.delta：流式文本增量。
+- response.output_text.done：该输出项的最终文本。
+- response.output_audio.delta：该输出项的音频数据块（base64）。
+- response.output_audio.done：该输出项音频流结束。
+- response.output_audio_transcript.delta：模型播报语音的流式转写增量。
+- response.output_audio_transcript.done：模型播报语音的最终转写。
+- response.content_part.added：新增一段输出内容（text/audio）。
+- response.content_part.done：该段输出内容完成。
+- response.output_item.added：新增一个输出项（message/function/mcp 等）。
+- response.output_item.done：该输出项完成。
+
+### 函数与 MCP 工具调用
+- response.function_call_arguments.delta：函数调用参数的流式 JSON 片段。
+- response.function_call_arguments.done：函数调用参数的最终 JSON。
+- response.mcp_call.in_progress：MCP 调用已开始；可检索条目以获详细信息。
+- response.mcp_call.completed：MCP 调用完成；输出在条目中可用。
+- response.mcp_call_arguments.delta：MCP 调用参数的流式片段（可能经过脱敏）。
+- response.mcp_call_arguments.done：MCP 调用参数的最终结果。
+- mcp_list_tools.in_progress：模型正在从某个服务器列举 MCP 工具。
+- mcp_list_tools.completed：列举完成，工具信息在条目中可用。
+- mcp_list_tools.failed：列举失败。
+
+### 会话与限流
+- session.created：初始会话信息（包含 tracing 配置）。
+- session.updated：会话配置已更新。
+- rate_limits.updated：配额更新（请求/Token 余量与重置时间）。
+
+### 错误
+- error：服务器返回的错误负载。
+
+## 客户端可发送的消息（发出）
+
+- conversation.item.create：创建一条用户消息（文本/图片）以触发模型响应。
+- conversation.item.delete：按 ID 删除条目。
+- conversation.item.retrieve：请求返回指定条目的完整数据。
+- conversation.item.truncate：在 audio_end_ms 处截断正在播放的助手输出（用于打断语音）。
+- input_audio_buffer.append：发送原始音频给服务器。
+- input_audio_buffer.commit：提交当前音频轮次。
+- input_audio_buffer.clear：清空当前输入音频缓冲。
+- response.create：请求模型产生新一轮响应（常见于工具输出之后）。
+- response.cancel：取消正在进行的响应。
+- session.update：更新会话配置（系统提示、工具、音频配置等）。
+
+在 WebSocket 传输下，interrupt() 会发送 conversation.item.truncate（并在需要时发送 response.cancel）。服务器随后会发回 conversation.item.truncated。
+
+## 传输层事件（SDK）
+
+由 OpenAIRealtimeWebSocket/WebRTC 抛出，类型见 transportLayerEvents.ts。
+
+- *：所有原始服务器事件，便于底层调试观察。
+- error：传输层错误。
+- connection_change：连接状态变化（connecting/connected/disconnected）。
+- turn_started：开始一轮响应（源自 response.created）。
+- turn_done：该轮响应结束（源自 response.done，带 usage）。
+- audio：输出音频数据块（ArrayBuffer）。
+- audio_done：该输出项的音频流结束。
+- audio_interrupted：由于用户说话或显式 interrupt()，已中断播放。
+- audio_transcript_delta：模型播报语音的转写增量。
+- usage_update：用量更新。
+- item_update：历史条目新增/更新（message/function/MCP 等）。
+- item_deleted：历史条目被删除。
+- function_call：模型请求调用函数/工具（包含名称与参数流）。
+- mcp_tool_call_completed：某次 MCP 工具调用完成。
+- mcp_approval_request：远程 MCP 工具请求执行审批。
+- mcp_tools_listed：某个 serverLabel 的远程 MCP 工具列表返回。
+
+## 会话层事件（SDK）
+
+更贴近业务的高层事件，定义见 realtimeSessionEvents.ts。
+
+- agent_start：当前 Agent 开始本轮工作。
+- agent_end：当前 Agent 结束并给出最终文本。
+- agent_handoff：发生 Agent 交接（from -> to）。
+- agent_tool_start：某个工具调用开始。
+- agent_tool_end：某个工具调用结束（含结果）。
+- transport_event：镜像传输层事件，便于需要直接访问底层事件的场景。
+- audio_start：开始收到该轮第一个音频数据块。
+- audio_stopped：音频播放结束。
+- audio：有可播放的输出音频数据。
+- audio_interrupted：输出被打断（应停止播放并更新 UI）。
+- guardrail_tripped：输出护栏被触发；会话会自动打断并发送反馈。
+- history_updated：本地历史快照被更新（全量）。
+- history_added：本地历史新增了一条条目。
+- error：会话中出现错误。
+- tool_approval_requested：某个工具或 MCP 调用需要审批。
+- mcp_tool_call_completed：某个 MCP 工具调用完成。
+- mcp_tools_changed：当前可用的 MCP 工具集合已变化（list-tools 返回或发生交接后）。
+
+## 打断流程（示例）
+
+当用户在模型说话时开始说话：
+
+1. 服务器发出 input_audio_buffer.speech_started。
+2. SDK 调用 interrupt()。
+3. 传输层抛出 audio_interrupted，并向服务器发送 conversation.item.truncate（包含 audio_end_ms 与 content_index）。
+4. 服务器返回 conversation.item.truncated；输出语音停止。
+5. 会话层抛出 audio_interrupted，以便你停止播放并更新 UI。
+
+也可以在“停止”按钮上手动打断：
+
+```ts
+session.interrupt();
+```
+
+打断后你可以立即发送新的用户输入（文本/语音），或根据会话配置由 VAD 自动处理。
