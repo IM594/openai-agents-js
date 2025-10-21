@@ -1,0 +1,102 @@
+---
+title: Realtime 이벤트 레퍼런스
+description: OpenAI Realtime API 이벤트와 SDK의 전송/세션 이벤트 의미 정리.
+---
+
+이 문서는 Realtime 관련 이벤트를 3가지 레이어로 정리합니다. 상세 타입은 packages/agents-realtime 내 파일을 참고하세요.
+
+- openaiRealtimeEvents.ts
+- transportLayerEvents.ts
+- realtimeSessionEvents.ts
+
+## 레이어 개요
+
+- 서버 이벤트: OpenAI에서 오는 원시 이벤트 (예: response.output_text.delta, conversation.item.truncated 등).
+- 전송(트랜스포트) 레이어: OpenAIRealtimeWebSocket/WebRTC가 방출하는 표준화 이벤트.
+- 세션 레이어: RealtimeSession이 방출하는 고수준 이벤트 (agent_start, audio_interrupted, history_updated 등).
+
+## 서버 이벤트 (수신)
+
+### Conversation
+
+- conversation.created / item.added / item.done / item.deleted / item.retrieved
+- conversation.item.input_audio_transcription.delta / completed / failed
+- conversation.item.truncated: 모델 출력 음성이 audio_end_ms/content_index에서 잘림. 사용자가 말해 중단될 때 주로 발생.
+
+힌트: 사용자가 중단하면 클라이언트가 conversation.item.truncate를 보내고, 서버가 conversation.item.truncated로 응답합니다.
+
+### 입력 오디오 버퍼 (클라이언트→서버)
+
+- input_audio_buffer.append / commit / cleared / clear / committed
+- input_audio_buffer.speech_started / speech_stopped (VAD 감지)
+
+### 출력 오디오 버퍼 (서버→클라이언트)
+
+- output_audio_buffer.started / stopped / cleared
+
+### 응답 라이프사이클/스트리밍
+
+- response.created (SDK: turn_started)
+- response.done (SDK: turn_done, usage 포함)
+- response.output_text.delta / done
+- response.output_audio.delta / done
+- response.output_audio_transcript.delta / done
+- response.content_part.added / done
+- response.output_item.added / done
+
+### 함수/MCP 도구
+
+- response.function_call_arguments.delta / done
+- response.mcp_call.in_progress / completed
+- response.mcp_call_arguments.delta / done
+- mcp_list_tools.in_progress / completed / failed
+
+### 세션/레이트 리미트
+
+- session.created / session.updated
+- rate_limits.updated
+
+### 에러
+
+- error
+
+## 클라이언트 발신 메시지
+
+- conversation.item.create / delete / retrieve / truncate
+- input_audio_buffer.append / commit / clear
+- response.create / cancel
+- session.update
+
+WebSocket: interrupt()가 conversation.item.truncate(필요 시 response.cancel 포함)를 보내고, 서버가 conversation.item.truncated를 보냅니다.
+WebRTC: interrupt()는 response.cancel에 더해 output_audio_buffer.clear를 보냅니다.
+
+## 전송(트랜스포트) 레이어 이벤트 (SDK)
+
+- - (모든 원시 이벤트)
+- error / connection_change (connecting|connected|disconnected)
+- turn_started / turn_done
+- audio / audio_done / audio_interrupted / audio_transcript_delta
+- usage_update / item_update / item_deleted / function_call
+- mcp_tool_call_completed / mcp_approval_request / mcp_tools_listed
+
+## 세션 레이어 이벤트 (SDK)
+
+- agent_start / agent_end / agent_handoff
+- agent_tool_start / agent_tool_end
+- transport_event
+- audio_start / audio_stopped / audio / audio_interrupted
+- guardrail_tripped
+- history_updated / history_added
+- error / tool_approval_requested / mcp_tool_call_completed / mcp_tools_changed
+
+## 중단(Interruption) 플로우 예시
+
+1. input_audio_buffer.speech_started 수신 (사용자 발화 감지).
+2. SDK가 interrupt() 호출.
+3. audio_interrupted 발생, conversation.item.truncate 전송 (audio_end_ms, content_index 포함).
+4. 서버가 conversation.item.truncated 응답 → 출력 음성 중지.
+5. 세션 레이어에서도 audio_interrupted 발생 → 재생 중지/UI 업데이트.
+
+```ts
+session.interrupt();
+```

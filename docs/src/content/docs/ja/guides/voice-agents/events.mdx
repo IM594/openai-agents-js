@@ -1,0 +1,117 @@
+---
+title: Realtime イベントリファレンス
+description: OpenAI Realtime API のイベントと SDK の transport/session イベントの意味。
+---
+
+このページは、Realtime に関わる主なイベントを「サーバーイベント」「トランスポート層イベント」「セッション層イベント」の3層で要約します。詳細な型は packages/agents-realtime 内の以下を参照してください。
+
+- openaiRealtimeEvents.ts
+- transportLayerEvents.ts
+- realtimeSessionEvents.ts
+
+## レイヤーの概要
+
+- サーバーイベント: OpenAI から届く生のイベント。例: response.output_text.delta, conversation.item.truncated など。
+- トランスポート層: OpenAIRealtimeWebSocket/WebRTC から発火する標準化イベント。
+- セッション層: RealtimeSession が発火する高レベルのイベント（agent_start, audio_interrupted, history_updated など）。
+
+## サーバーイベント（受信）
+
+### Conversation
+
+- conversation.created: 会話オブジェクトが作成された。
+- conversation.item.added: 会話にアイテムが追加された（message/function/mcp の開始）。
+- conversation.item.done: アイテム完了（最終コンテンツ/ステータス）。
+- conversation.item.deleted: 指定 ID のアイテムが削除。
+- conversation.item.retrieved: 特定アイテムの詳細（retrieve 要求後など）。
+- conversation.item.input_audio_transcription.delta: ユーザー音声入力の部分文字起こし。
+- conversation.item.input_audio_transcription.completed: ユーザー音声入力の最終文字起こし。
+- conversation.item.input_audio_transcription.failed: 文字起こしエラー。
+- conversation.item.truncated: モデルの出力音声が audio_end_ms/content_index で打ち切られた。ユーザーが発話して割り込みが発生したときに発生。
+
+ヒント: ユーザーが割り込むと、クライアントは conversation.item.truncate を送信し、サーバーは conversation.item.truncated を返します。
+
+### 入力オーディオバッファ（クライアント→サーバー）
+
+- input_audio_buffer.append: 音声バイト（PCM/PCMU/PCMA の base64）を送信。
+- input_audio_buffer.commit: 今回の音声入力を確定。
+- input_audio_buffer.cleared: 入力バッファがサーバー側でクリアされた通知。
+- input_audio_buffer.clear: 入力バッファのクリア要求。
+- input_audio_buffer.committed: 入力が取り込まれ、item_id が割り当てられた通知。
+- input_audio_buffer.speech_started: VAD がユーザーの発話開始を検知。
+- input_audio_buffer.speech_stopped: VAD が発話終了を検知。
+
+### 出力オーディオバッファ（サーバー→クライアント）
+
+- output_audio_buffer.started: モデルが出力音声の生成を開始。
+- output_audio_buffer.stopped: モデルが出力音声の生成を停止/一時停止。
+- output_audio_buffer.cleared: 出力バッファがクリア。
+
+### レスポンスとストリーミング
+
+- response.created: レスポンスのターン開始（SDK は turn_started にマップ）。
+- response.done: レスポンスのターン終了（usage と最終出力、SDK は turn_done にマップ）。
+- response.output_text.delta: テキストのストリーム増分。
+- response.output_text.done: テキストの最終チャンク。
+- response.output_audio.delta: 出力音声の base64 チャンク。
+- response.output_audio.done: 出力音声ストリーム終了。
+- response.output_audio_transcript.delta: モデル音声の文字起こし増分。
+- response.output_audio_transcript.done: モデル音声の最終文字起こし。
+- response.content_part.added / done: 出力コンテンツ（text/audio）の追加/完了。
+- response.output_item.added / done: 出力アイテム（message/function/mcp）の追加/完了。
+
+### 関数/MCP ツール
+
+- response.function_call_arguments.delta / done: 関数呼び出し引数の増分/確定。
+- response.mcp_call.in_progress / completed: MCP 呼び出しの開始/完了（詳細は item を retrieve）。
+- response.mcp_call_arguments.delta / done: MCP 引数の増分/確定（マスクありの可能性）。
+- mcp_list_tools.in_progress / completed / failed: MCP ツール列挙の進行/完了/失敗。
+
+### セッション/レート制限
+
+- session.created / updated: セッション情報の初期化/更新。
+- rate_limits.updated: リクエスト/トークンのレート更新。
+
+### エラー
+
+- error: サーバーからのエラー。
+
+## クライアント送信イベント（発信）
+
+- conversation.item.create / delete / retrieve / truncate
+- input_audio_buffer.append / commit / clear
+- response.create / cancel
+- session.update
+
+WebSocket では、interrupt() は conversation.item.truncate（必要に応じて response.cancel）を送信し、その後 conversation.item.truncated を受信します。WebRTC では、interrupt() は response.cancel に加えて output_audio_buffer.clear を送ります。
+
+## トランスポート層イベント（SDK）
+
+- \*: すべての生イベント。
+- error / connection_change（connecting|connected|disconnected）
+- turn_started / turn_done（response.created / response.done）
+- audio / audio_done / audio_interrupted / audio_transcript_delta
+- usage_update / item_update / item_deleted / function_call
+- mcp_tool_call_completed / mcp_approval_request / mcp_tools_listed
+
+## セッション層イベント（SDK）
+
+- agent_start / agent_end / agent_handoff
+- agent_tool_start / agent_tool_end
+- transport_event（トランスポート層イベントのミラー）
+- audio_start / audio_stopped / audio / audio_interrupted
+- guardrail_tripped
+- history_updated / history_added
+- error / tool_approval_requested / mcp_tool_call_completed / mcp_tools_changed
+
+## 割り込みフロー（例）
+
+1. input_audio_buffer.speech_started を受信（ユーザー発話検知）。
+2. SDK が interrupt() を呼ぶ。
+3. audio_interrupted を発火し、conversation.item.truncate を送信（audio_end_ms, content_index を含む）。
+4. サーバーが conversation.item.truncated を返し、音声出力が停止。
+5. セッション層でも audio_interrupted を発火して UI を更新。
+
+```ts
+session.interrupt();
+```
