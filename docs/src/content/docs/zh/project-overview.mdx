@@ -1,0 +1,94 @@
+---
+title: 项目概览
+description: 了解 OpenAI Agents JS 仓库的结构、主要功能与常用开发流程。
+---
+
+## 项目简介
+
+OpenAI Agents JS 是一个使用 pnpm 管理的 TypeScript 单体仓库，提供构建智能体工作流所需的核心运行时、OpenAI 绑定、实时能力以及面向生产环境的扩展组件。它与 [Python 版本](https://github.com/openai/openai-agents-python) 相互补充，让你能够在不同语言之间共享思路与模式。
+
+项目的核心目标是让你以最少的抽象搭建复杂的智能体系统。借助少量基础原语与 TypeScript 的类型系统，你可以快速组合智能体、工具、护栏与交接逻辑，并通过内建的追踪与评估工具掌握整条执行链路。
+
+## 核心能力
+
+- **声明式智能体定义**：使用 `Agent` 原语为模型配置说明、工具、上下文与生命周期钩子。
+- **工具调用与护栏**：将任意 TypeScript 函数暴露为函数工具，同时支持输入验证、护栏和失败回退策略。
+- **智能体交接**：通过 `Handoff` 在多个智能体之间切换上下文，构建协作式工作流。
+- **OpenAI 与第三方绑定**：`agents-openai`、`agents-realtime` 等子包为 OpenAI 模型、实时语音、Tracing 等功能提供即开即用的默认实现。
+- **追踪与监控**：内置 tracing，可将执行记录发送到 OpenAI 或自定义后端，用于可视化、调试和对话回放。
+- **扩展生态**：`agents-extensions` 提供 Cloudflare Workers、Twilio Voice、AI SDK 等场景的开箱方案，方便在不同运行环境中部署。
+
+## 仓库结构
+
+```
+/ (仓库根目录)
+├─ packages/              // SDK 各子包
+├─ docs/                  // 基于 Astro/Starlight 的文档站点
+├─ examples/              // 示例项目与使用模式
+├─ scripts/               // 开发与发布辅助脚本
+├─ helpers/               // 测试与内部共享工具
+├─ integration-tests/     // 结合 Verdaccio 的集成测试
+└─ AGENTS.md              // 贡献者指南
+```
+
+### packages/
+
+- `packages/agents`：聚合包，统一导出核心能力与 OpenAI 绑定。
+- `packages/agents-core`：智能体运行时与基础原语（智能体、交接、护栏、工具等）。
+- `packages/agents-openai`：对 OpenAI 模型、响应对象与评估工具的适配层。
+- `packages/agents-realtime`：WebRTC/WebSocket 等实时会话能力，包括语音智能体支持。
+- `packages/agents-extensions`：扩展运行时（如 Cloudflare Workers、Twilio Voice、OpenAI AI SDK）。
+
+### docs/
+
+文档站点采用 Astro + Starlight 构建，所有文章位于 `docs/src/content/docs/`。目录结构按照语言（如 `zh/`、`ja/`、`ko/`）与主题（`guides/`、`extensions/` 等）划分。
+
+### examples/
+
+示例目录以使用场景区分，例如 `basic`、`agent-patterns`、`deterministic` 等。每个示例都包含独立的 `package.json` 与运行脚本，方便复制或改造成自己的项目。
+
+### scripts/ 与 helpers/
+
+- `scripts/dev.mts`：在本地同时运行各包的构建监视与文档开发服务器（`pnpm dev`）。
+- `scripts/embedMeta.ts`：在构建前生成 `src/metadata.ts`，写入版本与包元数据。
+- `helpers/`：存放跨包共用的测试工具，例如模拟 OpenAI 响应、追踪断言等。
+
+## 常用命令
+
+所有命令默认通过 `pnpm` 执行：
+
+```bash
+pnpm build         # 运行预构建脚本与 tsc，确保类型检查通过
+pnpm test          # 使用 Vitest 执行单元测试（CI=1 模式下自动禁用 watch）
+pnpm lint          # 使用 ESLint 与 Prettier 规则校验代码
+pnpm -r build-check # 逐个包编译，验证示例与子包均可通过构建
+```
+
+如需只对单个子包操作，可使用 workspace 过滤器：
+
+```bash
+pnpm -F agents-core build
+pnpm -F agents-openai test
+```
+
+运行文档站点或示例：
+
+```bash
+pnpm docs:dev      # 启动 Astro 文档开发服务器
+pnpm examples:basic # 运行基础示例
+```
+
+## 建议的开发流程
+
+1. 从默认分支拉取最新代码并创建特性分支，例如 `git checkout -b feat/<feature>`。
+2. 在对应子包内实现功能或修复问题，必要时更新示例与文档。
+3. 提交前运行 `pnpm build && pnpm test && pnpm lint`，确认没有类型、测试或样式错误。
+4. 使用 Conventional Commits 规范撰写提交信息；如果变更影响公开 API，运行 `pnpm changeset` 新增变更说明。
+5. 在拉取请求中说明变更影响、测试情况与后续步骤，便于 Reviewer 快速理解。
+
+## 更多资源
+
+- [AGENTS.md](https://github.com/openai/openai-agents-js/blob/main/AGENTS.md)：贡献者指南，包含更多测试、风格与评审要求。
+- [README](https://github.com/openai/openai-agents-js#readme)：项目简介与安装说明。
+- [官方示例](https://github.com/openai/openai-agents-js/tree/main/examples)：快速了解典型用法。
+- [文档指南](../guides/quickstart/)：从零开始构建第一个智能体。
