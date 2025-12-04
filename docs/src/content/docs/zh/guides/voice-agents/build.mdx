@@ -46,13 +46,145 @@ import turnDetectionExample from '../../../../../../../examples/docs/voice-agent
 
 ## 交接
 
-与常规智能体类似，你可以使用交接将一个智能体拆分为多个智能体，并在它们之间进行编排，以提升智能体性能并更好地限定问题范围。
+与常规智能体类似，你可以使用交接将一个智能体拆分为多个智能体，并在它们之间进行编排，以提升智能体性能并更好地限定问题范围。Realtime 里的 handoff 和「子智能体 / 子流程」很像，但实现方式更接近「由模型自己调用的路由工具」。
 
 <Code lang="typescript" code={multiAgentsExample} />
 
-与常规智能体不同，交接在实时智能体上的行为略有差异。执行交接时，进行中的会话会更新为新的智能体配置。由此，智能体会自动访问正在进行的对话历史，并且当前不会应用输入过滤器。
+### handoff 在 Realtime 中做了什么？
 
-此外，这意味着在交接过程中不能更改 `voice` 或 `model`。你也只能连接到其他实时智能体。如果你需要使用不同的模型，例如像 `gpt-5-mini` 这样的推理模型，可以使用[通过工具进行委派](#delegation-through-tools)。
+1. 中间智能体将其它 `RealtimeAgent` 或 `Handoff` 对象放在 `handoffs` 数组里。
+2. SDK 把这些 handoff 暴露给 Realtime 模型，作为一组函数工具，名字形如 `transfer_to_math_tutor`。
+3. 当模型认为需要交接时，会像调用普通工具一样调用这个函数（function_call）。
+4. `RealtimeSession` 监听到函数调用后：
+   - 调用 handoff 上配置的 `onHandoff` / `inputType`（如果你使用 `handoff()` 手动创建过）；
+   - 根据返回值选出下一个 `RealtimeAgent`；
+   - 触发 `agent_handoff` 事件（方便你埋点、调试）；
+   - 使用新智能体的 `instructions`、`tools`、`handoffs` 更新 Realtime API 的 session 配置；
+   - 把一个类似 `{"assistant":"Math Tutor"}` 的函数调用输出发回给模型。
+5. 从下一轮开始，模型就在新的系统提示和工具集合下继续对话。
+
+> 从「用户体验」角度看，这是同步的：用户只看到角色从「接线员」切换成「数学老师」，中间不会多出一个额外对话回合。但在代码里，handoff 是一个普通的异步 promise 流程。
+
+### 交接之后会发生什么？会不会「回来」？
+
+- **当前智能体切换**：`RealtimeSession.currentAgent` 被更新为新智能体，后续所有响应都由它来生成。
+- **连接不变**：仍然是同一个 Realtime API 会话，同一个 WebRTC/WebSocket 连接。
+- **历史记录共享**：会话的 `history` 不会被重置，新智能体能看到之前整段对话。
+
+是否会「回到原来的智能体」完全取决于你的设计：
+
+- 如果新智能体的 `handoffs` 里包含原智能体（例如 `handoffs: [routerAgent]`），模型可以再调用一次 `transfer_to_router_agent` 切回来。
+- 或者你在业务代码里监听 `agent_end` / `agent_handoff` 事件，在合适的时机显式调用 `session.updateAgent(routerAgent)`。
+
+SDK 不会自动「调用完子智能体就返回父智能体」，它只是让模型在一组智能体之间自由切换，你需要通过提示词和 handoff 拓扑表达出期望的流转。
+
+### 交接的对象是什么？Agent / Session / 其它？
+
+- 被「交接过去」的是**另一个 `RealtimeAgent` 实例**（或者由 `handoff()` 包装过的 handoff 对象，它内部仍然指向一个智能体）。
+- `RealtimeSession` 始终只有一个，是整段语音对话的容器。
+- 一般的生命周期推荐是：
+  - **预先创建好一组 RealtimeAgent**（路由智能体、RAG 智能体、工具执行智能体等），进程级别复用；
+  - 为每个最终用户会话创建一个 `RealtimeSession`，传入初始智能体；
+  - 会话结束时调用 `session.close()`，释放底层连接；智能体对象本身是无状态配置，可以跨会话复用或由 GC 回收，不需要显式销毁。
+
+你也可以不用让模型自己决定，直接在代码里调用 `session.updateAgent(nextAgent)` 来完成一次「程序驱动」的交接，效果和模型触发 handoff 基本一致。
+
+### 历史记录和上下文怎么处理？能做 RAG 和 context compact 吗？
+
+Realtime 的关键点是：**所有智能体共享同一个会话历史**。
+
+- `RealtimeSession.history` 持有完整的 Realtime 历史（用户语音转写、模型音频输出、函数调用等）。
+- handoff 发生时：
+  - 会话历史不会清空；
+  - 当前 **不会应用 `handoff.inputFilter`**——文本智能体中的 `inputFilter` 对 Realtime 暂时无效；
+  - 新智能体通过上下文中的 `history` 直接访问同一份历史。
+
+这意味着：
+
+- 你可以在工具或后端逻辑中读取 `details.context.history`，做 RAG 或分析；
+- 但**不能**指望通过 handoff 把一部分历史「只给子智能体看」。
+
+对于你提到的两个典型问题：
+
+1. **RAG + 上下文长度敏感**
+
+   建议模式是：
+   - 不要把原始文档一股脑塞进 Realtime 会话；
+   - 在 `RealtimeAgent` 上定义一个 RAG 工具（或通过工具委派到后端文本智能体）：
+     - 工具读取当前 `history`，抽取检索 query；
+     - 在后端做检索 + 归纳，产出已经压缩好的短文本；
+     - 把这段短文本作为工具返回值 / 新的一条 message 写回会话。
+   - 这样 Realtime 模型看到的永远是**精简过的知识摘要**，而不是数百页原始文档。
+
+2. **长对话中的主动 compact**
+   - 使用 `RealtimeSession.updateHistory(...)` 可以手动重写历史：
+     - 定期把最早的若干轮对话取出；
+     - 调用一个「总结工具」或后端智能体把它们压缩成一小段摘要；
+     - 用摘要条目替换掉原来的多条消息后，调用 `updateHistory`。
+   - 之后所有智能体都只会在 compact 过的历史上继续对话，从而控制上下文长度。
+
+### 一个 Session 里可以有多少个智能体？如何协作？
+
+- 一个 `RealtimeSession` 可以在生命周期中**依次激活多个 `RealtimeAgent`**。
+- 任意智能体都可以在自己的 `handoffs` 里声明其它智能体，从而实现链式或图状的多智能体结构。
+- 但在任意一个时刻，**只有一个 `currentAgent` 在「说话」**：
+  - 它的 `instructions` 决定当前的角色和语气；
+  - 它的 `tools` + `handoffs` 决定当前可调用的函数和可交接的目标。
+
+典型架构包括：
+
+- **意图识别 / 路由智能体**：
+  - 只做意图识别和路由，很少直接回答用户。
+  - `handoffs` 指向多个领域专家智能体（账单、退货、技术支持……）。
+- **领域专家智能体**：
+  - 拿到完整对话历史，但提示词里只关注特定领域；
+  - 可以在必要时再交接回路由智能体，或交接到其它专家。
+
+因为所有智能体共享 `history`，路由智能体看到的上下文并不会比其它智能体少。你可以通过：
+
+- 给路由智能体更「轻量」的 instructions（例如只看最近几轮对话、只关注意图分类，不需要长分析）；
+- 配合上面的 history compact，把很久之前的细节压缩成一两条摘要；
+
+来间接实现「轻上下文的 router + 重推理的专家」。
+
+### Realtime handoff 的限制
+
+- 同一个 `RealtimeSession` 中所有 `RealtimeAgent` 共享同一个 `model` 和 `voice`。会话一旦开始，交接时不能修改这两个字段，否则底层 Realtime API 会报错或拒绝更新配置。
+- handoff 的目标必须也是 `RealtimeAgent`。如果你想调用纯文本智能体（例如 `gpt-5-mini` 推理智能体或一个后端 RAG 智能体），推荐使用下文的[通过工具进行委派](#delegation-through-tools)模式，在工具中发起后端调用。
+
+### 延迟：handoff 会不会拖慢 Realtime 语音体验？
+
+handoff 的额外成本主要有两部分：
+
+1. 模型做出「调用 handoff 工具」的决策；
+2. SDK 处理函数调用（运行 `onHandoff`、更新 session 配置）并把函数结果发回 Realtime API。
+
+这一过程在一次**模型回合内完成**，不会额外再发起一次新的模型调用，所以：
+
+- 相比「始终只用一个智能体」，handoff 确实会多出一次函数调用的往返时间；
+- 但在多数语音场景中，这段时间和普通工具调用差不多，通常不会被用户明显感知。
+
+如果对延迟非常敏感，可以考虑：
+
+- 把路由逻辑尽量简单，让模型快速决定是否 handoff；
+- 避免一轮话语里连续多次 handoff；
+- 已经在业务流程中知道要切智能体时，直接在代码里调用 `session.updateAgent(nextAgent)`，而不是再让模型自己推理一次。
+
+### 模型是如何知道要 handoff 的？
+
+- 从模型视角看，handoff **就是一组工具**：
+  - 每个目标智能体会暴露成一个 `transfer_to_xxx` 的函数；
+  - 你通过 `handoffDescription` 和智能体的 instructions 告诉模型「什么时候该用哪个 handoff」；
+  - 可以用 core 包里的推荐前缀（`RECOMMENDED_PROMPT_PREFIX`）来加强提示（详见通用[交接指南](/openai-agents-js/zh/guides/handoffs)）。
+- 你也可以通过 `handoff({ isEnabled })` 控制某些 handoff 在当前上下文是否可见，例如：
+  - 用户尚未登录时隐藏「退款智能体」；
+  - 某个流程走完后才开放「下单智能体」。
+
+综上，Realtime handoff 更像是「由模型驱动的、在同一 Realtime 会话内切换多个语音智能体」的机制，而不是完全独立的子会话。它适合用来：
+
+- 把复杂语音应用拆成多个职责清晰的智能体；
+- 把 RAG、强推理、后台调用这些重逻辑放在专门智能体或后端工具里；
+- 在保证低延迟体验的同时，获得可观察、可编排的多智能体结构。
 
 ## 工具
 
