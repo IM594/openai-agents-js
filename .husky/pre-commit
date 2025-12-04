@@ -3,16 +3,19 @@ pnpm prettier $(git diff --cached --name-only --diff-filter=ACMR | sed 's| |\\ |
 git update-index --again
 
 # run lint on staged files
-pnpm eslint $(git diff --cached --name-only --diff-filter=ACMR | sed 's| |\\ |g') --fix
-git update-index --again
+ESLINT_FILES=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '\.(cjs|mjs|cts|mts|js|jsx|ts|tsx)$' || true)
+if [ -n "$ESLINT_FILES" ]; then
+  pnpm eslint $(echo "$ESLINT_FILES" | sed 's| |\\ |g') --fix
+  git update-index --again
+fi
 
 # check for secrets
 if [ -z "$CI" ] && [ -z "$GITHUB_ACTIONS" ]; then
-  if ! command -v trufflehog >/dev/null 2>&1; then
+  if command -v trufflehog >/dev/null 2>&1; then
+    trufflehog git file://. --since-commit HEAD --fail
+  else
     echo "trufflehog' is not installed or not in your PATH."
     echo "Download it from: https://github.com/trufflesecurity/trufflehog"
     echo "Skipping secrets check due to missing trufflehog."
-    exit 1
   fi
-  trufflehog git file://. --since-commit HEAD --fail
 fi

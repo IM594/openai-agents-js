@@ -20,6 +20,7 @@ export default tseslint.config(
     '**/dist/**',
     '**/node_modules/**',
     '**/docs/.astro/**',
+    'docs/src/content/**/*.mdx',
     'examples/realtime-next/**',
     'examples/realtime-demo/**',
     'examples/nextjs/**',
@@ -48,6 +49,9 @@ export default tseslint.config(
       rules: {
         '@typescript-eslint/no-unused-vars': 'off',
       },
+    },
+    {
+      ignores: ['**/*.md', '**/*.mdx'],
     },
   ],
 );
